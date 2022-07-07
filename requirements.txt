@@ -1,0 +1,7 @@
+convokit
+pandas
+gender-guesser
+genderize
+guess_indian_gender
+cinemagoer
+bechdel
