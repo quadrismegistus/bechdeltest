@@ -7,15 +7,15 @@ def get_cast_from_imdb(imdb_id):
     global URL_CACHE
     url=f'https://www.imdb.com/title/tt{imdb_id}/fullcredits'
     if url not in URL_CACHE:
-    html=gethtml(url)
-    URL_CACHE[url] = html
+        html=gethtml(url)
+        URL_CACHE[url] = html
     else:
-    html = URL_CACHE[url]
+        html = URL_CACHE[url]
 
 
     # parse with beautiful soup
     import bs4
-    dom = bs4.BeautifulSoup(html)
+    dom = bs4.BeautifulSoup(html, 'lxml')
 
     # find the cast_list table
     table = dom.select_one('.cast_list')
@@ -31,8 +31,8 @@ def get_cast_from_imdb(imdb_id):
 
         odx={}
         odx['actor_name'] = actor_cell.text.replace('\n',' ').strip()
-        odx['actor_fname'] = odx['actor_name'].split()[0]
-        odx['actor_lname'] = odx['actor_name'].split()[-1]
+        # odx['actor_fname'] = odx['actor_name'].split()[0]
+        # odx['actor_lname'] = odx['actor_name'].split()[-1]
 
         actor_link = actor_cell.select_one('a')
         actor_url = actor_link.attrs['href']
@@ -41,8 +41,8 @@ def get_cast_from_imdb(imdb_id):
 
 
         odx['char_name'] = char_cell.text.replace('\n',' ').strip()
-        odx['char_fname'] = odx['char_name'].split()[0]
-        odx['char_lname'] = odx['char_name'].split()[-1]
+        # odx['char_fname'] = odx['char_name'].split()[0]
+        # odx['char_lname'] = odx['char_name'].split()[-1]
 
         char_link = char_cell.select_one('a')
         odx['char_id'] = ''
