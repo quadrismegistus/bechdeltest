@@ -19,7 +19,7 @@ print(requirements)
 
 setup(
     name="bechdeltest",
-    version="0.0.5",
+    version="0.0.6",
     url="https://github.com/quadrismegistus/bechdeltest",
     license='MIT',
 
