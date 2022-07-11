@@ -247,7 +247,65 @@ class BechdelTestText(BaseText):
 
     def get_interactions(self):
         return pd.DataFrame(self.iter_interactions()).set_index(['scene_num','scene_desc','line_num','source','target'])
-                    
+
+    def iter_networks(self):
+
+        # utility
+        def recolor_network(g,source='',target=''):
+            for node in g.nodes(): 
+                if g.nodes[node]['actor_gender']=='CM':
+                    g.nodes[node]['color']='green'
+                elif g.nodes[node]['actor_gender']=='CF':
+                    g.nodes[node]['color']='purple'
+                else:
+                    g.nodes[node]['color']='gray'
+            
+            if source and target and g.has_edge(source,target):
+                for a,b,d in g.edges(data=True):
+                    # if g.nodes[a]['actor_gender'] == 'CM' and g.nodes[b]['actor_gender']=='CM':
+                        # g.edges[(a,b)]['color']='green'
+                    if g.nodes[a]['actor_gender'] == 'CF' and g.nodes[b]['actor_gender']=='CF':
+                        g.edges[(a,b)]['color']='purple'
+                    else:
+                        g.edges[(a,b)]['color']='black'
+                
+                g.edges[source,target]['color']='red'
+            return g
+
+
+        import networkx as nx
+        G = nx.DiGraph()
+        dfcast = self.get_cast()
+        u2d={}
+
+        def rename(x):
+            x=x.split('/')[0].split('(')[0]
+            while '  ' in x: x=x.replace('  ',' ')
+            return x.strip()
+
+        for d in dfcast.to_dict('records'):
+            u=rename(d['char_name'])
+            u2d[u]=d
+        
+        ld = list(self.iter_interactions())
+        for t,d in enumerate(tqdm(ld)):
+            u,v=rename(d['source']),rename(d['target'])
+            d['weight'] = d['num_speeches']
+            if u != v:
+                if not G.has_node(u): G.add_node(u, **u2d[u])
+                if not G.has_node(v): G.add_node(v, **u2d[v])
+                if not G.has_edge(u,v):
+                    G.add_edge(u,v,**d)
+                else:
+                    for kk,vv in d.items():
+                        if type(vv)==str: vv = ' || '+vv
+                        v0 = G.edges[(u,v)].get(kk)
+                        G.edges[(u,v)][kk]=v0+vv if type(v0)==type(vv) and type(v0) in {str,int} else vv
+                
+                yield recolor_network(G,u,v)
+
+            # if t>25: break
+            
         
 
 
