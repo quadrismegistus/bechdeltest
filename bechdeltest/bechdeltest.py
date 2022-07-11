@@ -80,9 +80,10 @@ class BechdelTestText(BaseText):
 
                 old.append(odx)
 
-            res=pd.DataFrame(old)
+            res=old
             self.qdb.set(qkey, res)
 
+        res = pd.DataFrame(res)
         res = res[~res.char_name.str.lower().str.contains('uncredited')]
         res = res[~res.actor_name.str.lower().str.contains('uncredited')]
 
@@ -140,8 +141,8 @@ class BechdelTestText(BaseText):
             res['rank_castlist'] = pd.Series(list(range(len(dfcast1))))+1
             res['rank_speaking'] = dfcast1.num_words.rank(ascending=False, method='min').apply(int)
             res = res.sort_values('rank_castlist')
-            self.qdb.set(qkey,res)
-        return res
+            self.qdb.set(qkey,res.to_dict('records'))
+        return pd.DataFrame(res)
 
     def get_cast(self,min_gender_prob=.95,force=False,min_speeches=2):
         qkey='cast_'+self.id
@@ -165,9 +166,9 @@ class BechdelTestText(BaseText):
                 ]
             
             res = dfcast
-            self.qdb.set(qkey,res)
+            self.qdb.set(qkey,res.to_dict('records'))
         
-        odf = res
+        odf = pd.DataFrame(res)
         odf['actor_url'] = odf['actor_id'].apply(lambda x: f'https://www.imdb.com/name/{x}')
         odf['char_url'] = odf['actor_id'].apply(lambda x: f'https://www.imdb.com/title/tt{self.imdb}/characters/{x}')
         odf=res.query(f'num_speeches>={min_speeches}')
@@ -376,7 +377,7 @@ class BechdelTest(BaseCorpus):
         idx = get_imdb_id(imdb_id)
 
         res = self.qdb.get(idx)
-        if res is not None: return res
+        if res is not None: return pd.DataFrame(res)
                 
 
         from imdb import Cinemagoer
@@ -385,7 +386,7 @@ class BechdelTest(BaseCorpus):
 
         imdb_data = {k:movie[k] for k in self.IMDB_META_KEYS}
         imdb_data['correct_imdb']='tt'+idx
-        self.qdb.set(idx,imdb_data)
+        self.qdb.set(idx,imdb_data.to_dict('records'))
         return imdb_data
 
 
