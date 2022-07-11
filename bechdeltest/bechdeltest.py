@@ -319,6 +319,7 @@ class BechdelTestText(BaseText):
         from lltk.model.networks import draw_nx_dynamic
         return draw_nx_dynamic(
             self.iter_networks(),
+            ofn=f'fig.dynamic_graph.{self.id}.mp4',
             final_g=self.get_network(),
             **opts
         )
