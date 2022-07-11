@@ -322,6 +322,61 @@ class BechdelTestText(BaseText):
             final_g=self.get_network(),
             **opts
         )
+
+    def get_bechdel_scores(self,force=False):
+        
+        qkey='bechdelscores_'+self.id
+        res = self.qdb.get(qkey) if not force else None
+        if res is None:
+            import bs4
+
+            d = do_get_bechdel_score(self.imdb)
+            id = d.get('id')
+            if id:
+                url=f'https://bechdeltest.com/view/{id}'
+                htm=gethtml(url).replace('\r\n','\n').replace('\r','\n')
+                dom=bs4.BeautifulSoup(htm,'lxml')
+                if htm:
+                    paras=list(dom('p'))
+                    comments=list(dom.select('.comment'))
+                    if paras and comments:
+                        d['msg'] = paras[0].text.strip()
+                        d['explanation'] = comments[0].text.strip()
+                        d['comments'] = '\n----------\n'.join([x.text.strip() for x in comments[1:]]) if len(comments)>1 else ''
+                        while '\n\n\n' in d['comments']: d['comments']=d['comments'].replace('\n\n\n','\n\n')
+
+                        res = d
+                        self.qdb.set(qkey,res)
+        
+        return res
+        
+        
+
+    def show_bechdel_scores(self):
+        d = self.get_bechdel_scores()
+        comments='\n\t* '+'\n\t* '.join('\n\t\t* '.join(y.strip() for y in x.split('\n') if y.strip()) for x in d.get("comments").split("----------"))
+        printm(f'* Rating: **{d.get("rating")}**')
+        printm(f'* Note: {d.get("msg")}')
+        printm(f'* Explanation: {d.get("explanation")}')
+        printm(f'* Comments: {comments}')
+
+    def show_nonCM_dialogue(self):
+        g=self.get_network()
+        for a,b,d in g.edges(data=True):
+            ag,bg=g.nodes[a]['actor_gender'],g.nodes[b]['actor_gender']
+            if ag and bg and ag!='CM' and bg!='CM':
+                printm(f'##### {a} ({ag}) --> {b} ({bg})')
+                printm('* ' + d['speech'].replace('||','\n* '))
+                print()
+
+    def show_POC_dialogue(self):
+        g=self.get_network()
+        for a,b,d in g.edges(data=True):
+            ag,bg=g.nodes[a]['actor_race'],g.nodes[b]['actor_race']
+            if ag and bg and ag!='W' and bg!='W':
+                printm(f'##### {a} ({ag}) --> {b} ({bg})')
+                printm('* ' + d['speech'].replace('||','\n* '))
+                print()
             
         
 
