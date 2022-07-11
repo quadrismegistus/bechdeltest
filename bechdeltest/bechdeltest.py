@@ -350,6 +350,36 @@ class BechdelTestText(BaseText):
         
         return res
         
+    def get_ratios(self):
+        dfcast = self.get_cast()
+        dfcast['actor_not_CM'] = dfcast['actor_gender'].apply(lambda x: None if not x else x!='CM')
+        dfcast['actor_not_W'] = dfcast['actor_race'].apply(lambda x: None if not x else x!='W')
+        
+        odf=dfcast.groupby('actor_not_CM').agg(dict(num_speeches=sum, num_words=sum, rank_castlist=np.median, rank_speaking=np.median))
+        odx={}
+        if len(odf)==2:
+            nums_CM = odf.loc[False]
+            nums_notCM = odf.loc[True]
+            ratios_CM_to_notCM = dict(nums_CM / nums_notCM)
+            for k,v in nums_CM.items(): odx[k+'__gender_CM']=v
+            for k,v in nums_notCM.items(): odx[k+'__gender_notCM']=v
+            for k,v in ratios_CM_to_notCM.items():
+                odx[k+'__gender_CM_to_notCM']=v
+        
+        odf=dfcast.groupby('actor_not_W').sum()
+        if len(odf)==2:
+            nums_CM = odf.loc[False]
+            nums_notCM = odf.loc[True]
+            ratios_CM_to_notCM = dict(nums_CM / nums_notCM)
+            for k,v in nums_CM.items(): odx[k+'__race_W']=v
+            for k,v in nums_notCM.items(): odx[k+'__race_notW']=v
+            for k,v in ratios_CM_to_notCM.items():
+                odx[k+'__race_W_to_notW']=v
+        
+        odx={k:v for k,v in sorted(odx.items()) if not k.startswith('actor_')}
+        return odx
+            
+        
         
 
     def show_bechdel_scores(self):
