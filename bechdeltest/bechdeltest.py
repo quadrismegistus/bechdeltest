@@ -305,6 +305,23 @@ class BechdelTestText(BaseText):
                 yield recolor_network(G,u,v)
 
             # if t>25: break
+
+    def get_network(self):
+        for g in self.iter_networks(): pass
+        return g
+
+    def draw_network(self,g=None,**opts):
+        from lltk.model.networks import draw_nx
+        if g is None: g=self.get_network()
+        return draw_nx(g,**opts)
+
+    def draw_networks(self,**opts):
+        from lltk.model.networks import draw_nx_dynamic
+        return draw_nx_dynamic(
+            self.iter_networks(),
+            final_g=self.get_network(),
+            **opts
+        )
             
         
 
