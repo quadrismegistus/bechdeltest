@@ -358,7 +358,7 @@ class BechdelTestText(BaseText):
         printm(f'* Rating: **{d.get("rating")}**')
         printm(f'* Note: {d.get("msg")}')
         printm(f'* Explanation: {d.get("explanation")}')
-        printm(f'* Comments: {comments}')
+        if d.get('comments'): printm(f'* Comments: {comments}')
 
     def show_nonCM_dialogue(self):
         g=self.get_network()
