@@ -6,3 +6,4 @@ guess_indian_gender
 cinemagoer
 bechdel
 thefuzz
+pickle5

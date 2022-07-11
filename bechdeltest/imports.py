@@ -12,7 +12,7 @@ PATH_CORPUS_METADATA = os.path.join(PATH_CORPUS, 'metadata.csv')
 PATH_CORPUS_TEXTS = os.path.join(PATH_CORPUS, 'texts')
 
 # native imports
-import os,sys,random,json,pickle,shutil
+import os,sys,random,json,pickle5 as pickle,shutil
 from collections import defaultdict,Counter
 from pprint import pprint
 from tqdm import tqdm
