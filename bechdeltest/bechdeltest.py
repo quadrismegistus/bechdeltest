@@ -9,21 +9,77 @@ GENDERD={
     'transfemale':'FM'
 }
 
-def get_imdb_id(imdb_id):
-    # get imdb id
-    idx=str(imdb_id)
-    if idx.startswith('tt'): idx=idx[2:]
-    while len(idx)<7: idx='0'+idx    
-    return idx
+
+
 
 
 class BechdelTestText(BaseText):
     @property
-    def imdb(self):
-        return get_imdb_id(self.meta.get('imdbID'))
+    def imdb(self): return get_imdb_id(self.meta.get('imdbID'))
+    @property
+    def path_dialogue(self): return os.path.join(self.path,f'{self.id}.dialogue.csv')
+    @property
+    def path_cast(self): return os.path.join(self.path,f'{self.id}.cast.csv')
 
-    def get_dialogue(self):
+    def get_dialogue(self,force=False):
+        dfdial = pd.DataFrame()
+        if not force: dfdial = read_df_anno(self.path_dialogue)
+        if dfdial is None or not len(dfdial):
+            if self.txt: dfdial = self.get_dialogue_txt()
+            if not len(dfdial): dfdial = self.get_dialogue_fandom()
+            if len(dfdial):
+                ensure_dir_exists(self.path_dialogue)
+                dfdial=dfdial[dfdial.speaker!='']
+                dfdial.to_csv(self.path_dialogue,index=False)
+        
+        dfdial=dfdial.set_index('line_num')
+        dfdial['num_words'] = dfdial.speech.apply(lambda text: len(str(text).strip().split()))
+        return dfdial
+    dialogue=get_dialogue
+        
+
+    def get_dialogue_txt(self):
         return parse_script(self.txt)
+
+    def get_dialogue_fandom(self):
+        url = self.meta.get('script_url')
+        if not url: return ''
+        if 'fandom' not in url or not url.endswith('/Transcript'): return ''
+        
+        htm = self.qdb.get(url)
+        if not htm:
+            htm = gethtml(url)
+            self.qdb.set(url,htm)
+        
+        import bs4
+        dom = bs4.BeautifulSoup(htm).select_one('#mw-content-text')
+        if not dom: return pd.DataFrame()
+        
+        sep=' || '
+        o=[]
+        scene_num=1
+        for i,p in enumerate(dom('p')):
+            directions = [tag.extract().text.strip() for tag in p('i')]
+            speakers = [tag.extract().text.replace(':','').strip() for tag in p('b')]
+            speech = str(p.text).strip()
+
+            if any(['scene' in x and 'change' in x for x in directions]):
+                scene_num+=1
+
+            odx=dict(
+                line_num=i+1,
+                scene_num=scene_num,
+                speaker=sep.join(x for x in speakers if x),
+                speech=speech,
+                direction=sep.join(x for x in directions if x),
+                narration='',
+                scene_desc='',
+
+            )
+            o.append(odx)
+        odf=pd.DataFrame(o)
+
+        return odf
 
     def get_cast_from_imdb(self, force=False):
         qkey='cast_'+self.imdb
@@ -83,8 +139,8 @@ class BechdelTestText(BaseText):
             res=pd.DataFrame(old)
             self.qdb.set(qkey, res)
 
-        res = res[~res.char_name.str.lower().str.contains('uncredited')]
-        res = res[~res.actor_name.str.lower().str.contains('uncredited')]
+        # res = res[~res.char_name.str.lower().str.contains('uncredited')]
+        # res = res[~res.actor_name.str.lower().str.contains('uncredited')]
 
         return res
 
@@ -143,12 +199,12 @@ class BechdelTestText(BaseText):
             self.qdb.set(qkey,res)
         return res
 
-    def get_cast(self,min_gender_prob=.95,force=False,min_speeches=2):
-        qkey='cast_'+self.id
-        res = self.qdb.get(qkey) if not force else None
-        if res is None:
-
-            dfcast = self.get_cast_combined(force=force)
+    def get_cast(self,min_gender_prob=.95,force=False,min_speeches=0):
+        # qkey='cast_'+self.id
+        # res = self.qdb.get(qkey) if not force else None
+        ofn = self.path_cast
+        if force or not os.path.exists(ofn):
+            dfcast = self.get_cast_combined(force=force).fillna('')
             names = []
 
 
@@ -159,24 +215,54 @@ class BechdelTestText(BaseText):
                 ]
                 fnames_gendered = self.corpus.genderfy(fnames)
                 onamek=namek.split('_')[0] + '_gender'
-                dfcast[onamek] = [
+                dfcast[onamek] = dfcast[onamek+'_auto'] = [
                     GENDERD.get(gd.get('gender'),'') if gd.get('probability',0)>=min_gender_prob else ''
                     for gd in fnames_gendered
                 ]
-            
-            res = dfcast
-            self.qdb.set(qkey,res)
-        
-        odf = res
-        odf['actor_url'] = odf['actor_id'].apply(lambda x: f'https://www.imdb.com/name/{x}')
-        odf['char_url'] = odf['actor_id'].apply(lambda x: f'https://www.imdb.com/title/tt{self.imdb}/characters/{x}')
-        odf=res.query(f'num_speeches>={min_speeches}')
 
-        dfactors = self.corpus.metadata_actors()
-        if len(dfactors):
-            odf = odf[[col for col in odf if col=='actor_id' or col not in set(dfactors.columns)]].merge(dfactors, on='actor_id', how='left')
+            odf = res = dfcast
+
+            odf['actor_url'] = odf['actor_id'].apply(lambda x: f'https://www.imdb.com/name/{x}')
+            odf['char_url'] = odf['actor_id'].apply(lambda x: f'https://www.imdb.com/title/tt{self.imdb}/characters/{x}')
+            odf=res.query(f'num_speeches>={min_speeches}')
+            odf['char_id'] = odf['actor_id']
+
+            meta_actors = pd.concat([self.metadata_cast(), self.corpus.metadata_actors()]).fillna('').drop_duplicates('actor_id',keep='first')
+            actor_id2feats = meta_actors.set_index('actor_id').T.to_dict()
+            
+            dfchars = pd.concat([self.metadata_cast(), self.corpus.metadata_chars().query(f'id == "{self.id}"')]).fillna('')
+            char_id2feats={}
+            if len(dfchars) and 'actor_id' in set(dfchars.columns):
+                dfchars=dfchars.drop_duplicates('actor_id',keep='first')
+                dfchars['char_id'] = dfchars['actor_id']
+                char_id2feats=dfchars.set_index('char_id').T.to_dict()
+
+
+            o=[]
+            for row in odf.to_dict('records'):
+                for k,v in char_id2feats.get(row['char_id'], {}).items(): 
+                    if v and k.startswith('char_') or k.startswith('actor_') or k in {'speakers'}:
+                        row[k]=v
+                for k,v in actor_id2feats.get(row['actor_id'], {}).items():
+                    if v and k.startswith('actor_'):
+                        row[k]=v
+                o.append(row)
+            odf = pd.DataFrame(o)
+            if 'id' in set(odf.columns): odf=odf.drop('id',axis=1)
+            odf.to_csv(ofn,index=False)
+            res = odf
+        else:
+            res = pd.read_csv(ofn).fillna('')
         
-        return odf
+        return res
+    cast = get_cast
+
+    def metadata_cast(self):
+        if self.id in self.corpus.get_urls():
+            url = self.corpus.get_urls().get(self.id)
+            df = pd.read_csv(url).fillna('')
+            return df
+        return pd.DataFrame()
             
     
     def get_speaker2char(self,dfcast=None):
@@ -355,8 +441,17 @@ class BechdelTestText(BaseText):
         dfcast = self.get_cast()
         dfcast['actor_not_CM'] = dfcast['actor_gender'].apply(lambda x: None if not x else x!='CM')
         dfcast['actor_not_W'] = dfcast['actor_race'].apply(lambda x: None if not x else x!='W')
+        dfcast['num_chars']=1
         
-        odf=dfcast.groupby('actor_not_CM').agg(dict(num_speeches=sum, num_words=sum, rank_castlist=np.median, rank_speaking=np.median))
+        odf=dfcast.groupby('actor_not_CM').agg(
+            dict(
+                num_speeches=sum,
+                num_words=sum,
+                num_chars=sum,
+                rank_castlist=np.median,
+                rank_speaking=np.median
+            )
+        )
         odx={}
         if len(odf)==2:
             nums_CM = odf.loc[False]
@@ -379,17 +474,40 @@ class BechdelTestText(BaseText):
         
         odx={k:v for k,v in sorted(odx.items()) if not k.startswith('actor_')}
         return odx
+
+    def show_ratios(self):
+        rd = self.get_ratios()
+        
+        o=f"""
+### Number of characters
+
+* **{rd.get("num_chars__gender_CM",0):.0f}** cismen to **{rd.get("num_chars__gender_notCM",0):.0f}** non-cismen (**{rd.get("num_chars__gender_CM_to_notCM",0):.1f}x**)
+* **{rd.get("num_chars__race_W",0):.0f}** white people to **{rd.get("num_chars__race_notW",0):.0f}** people of color (**{rd.get("num_chars__race_W_to_notW",0):.1f}x**)
+
+### Number of speeches
+
+* **{rd.get("num_speeches__gender_CM",0):.0f}** speeches by cismen to **{rd.get("num_speeches__gender_notCM",0):.0f}** by non-cismen (**{rd.get("num_speeches__gender_CM_to_notCM",0):.1f}x**)
+* **{rd.get("num_speeches__race_W",0):.0f}** speeches by white people to **{rd.get("num_speeches__race_notW",0):.0f}** by people of color (**{rd.get("num_speeches__race_W_to_notW",0):.1f}x**)
+
+### Number of words spoken
+
+* **{rd.get("num_words__gender_CM",0):,.0f}** words by cismen to **{rd.get("num_words__gender_notCM",0):,.0f}** by non-cismen (**{rd.get("num_words__gender_CM_to_notCM",0):.1f}x**)
+* **{rd.get("num_words__race_W",0):,.0f}** words by white people to **{rd.get("num_words__race_notW",0):,.0f}** by people of color (**{rd.get("num_words__race_W_to_notW",0):.1f}x**)
+"""
+        printm(o)
             
         
         
 
-    def show_bechdel_scores(self):
+    def show_bechdel_scores(self,max_comments=3):
         d = self.get_bechdel_scores()
-        comments='\n\t* '+'\n\t* '.join('\n\t\t* '.join(y.strip() for y in x.split('\n') if y.strip()) for x in d.get("comments").split("----------"))
-        printm(f'* Rating: **{d.get("rating")}**')
-        printm(f'* Note: {d.get("msg")}')
-        printm(f'* Explanation: {d.get("explanation")}')
-        if d.get('comments'): printm(f'* Comments: {comments}')
+        comments='\n\t* '+'\n\t* '.join('\n\t\t* '.join(y.strip() for y in x.split('\n') if y.strip() and not y.strip().startswith('Message posted on ')) for x in d.get("comments").split("----------")[:max_comments])
+        o=[]
+        o+=[f'* Rating: **{d.get("rating")}**']
+        o+=[f'* Note: {d.get("msg")}']
+        o+=[f'* Explanation: {d.get("explanation")}']
+        if d.get('comments'): o+=[f'* Comments: {comments}']
+        printm('\n'.join(o))
 
     def show_nonCM_dialogue(self):
         g=self.get_network()
@@ -408,8 +526,92 @@ class BechdelTestText(BaseText):
                 printm(f'##### {a} ({ag}) --> {b} ({bg})')
                 printm('* ' + d['speech'].replace('||','\n* '))
                 print()
+
+
+    def show_graph_info(self):
+        
+        printm(f'# {self.id}')
+
+        printm(f'## Final social network')
+        self.draw_network()
+
+        printm(f'## Gender/race ratios')
+        self.show_ratios()
+
+        printm(f'## Bechdeltest.com score')
+        self.show_bechdel_scores()
+
+        printm(f'## Dialogue between non-cismen')
+        self.show_nonCM_dialogue()
+
+        printm(f'## Dialogue between people of  color')
+        self.show_POC_dialogue()
+
+        printm(f'## Cast')
+        display(self.get_cast())
             
         
+    def get_speeches(self):
+        dial = self.get_dialogue()
+        return list(dial.speech) if len(dial) else []
+
+    def get_topics(self):
+        if not self.corpus._topic_model_doc2topic: self.corpus.topic_model()
+        if not self.corpus._topic_model_doc2topic: return {}
+        topic2counts = Counter()
+        for speech in self.get_speeches():
+            topic = self.corpus._topic_model_doc2topic.get(speech)
+            if topic is not None and topic>=0:
+                topic2counts[topic]+=1
+        return topic2counts
+
+    def get_doc_topic_probs(self):
+        if not self.corpus._topic_model_doc2topic: self.corpus.topic_model()
+        if not self.corpus._topic_model_doc2topic: return {}
+        
+        dfdial = self.get_dialogue()
+        if not len(dfdial): return pd.DataFrame()
+        
+        for speech in self.get_speeches():
+            topic = self.corpus._topic_model_doc2topic.get(speech)
+            if topic is not None and topic>=0:
+                topic2counts[topic]+=1
+        return topic2counts
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -424,7 +626,9 @@ class BechdelTest(BaseCorpus):
     IMDB_META_KEYS = ['rating', 'votes', 'imdbID', 'title', 'year']
     URL_ACTOR_METADATA = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQfw71n4k_a3p2gSj-Jhy-X3px1MQMf-Kr9EmIEM5bsZIJKEZu1koTLUy0ZY87oq0MH-XJqR4AYaNpQ/pub?gid=1183738268&single=true&output=csv'
     URL_CHAR_METADATA = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRuBd6kmJroxVXWOIrr1Ebf5vKqN2LKbWijSZXyDBDdcHLd2Rp5Qo18OA8YWJ7_lMnDwDdPCHQWzFEF/pub?gid=1934597839&single=true&output=csv'
-    
+    URL_OF_URLS = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vS1GjWpm41GyN13hHQ_Gmm8BLxKxTcyueX2A60uW7jWe3rMievBLAd1goftP06uYGzmg6rSNZEKM-m5/pub?gid=0&single=true&output=csv'
+
+
     def genderfy(self,names,force=False):
         named={}
         with self.qdb as db:
@@ -468,7 +672,7 @@ class BechdelTest(BaseCorpus):
         # save files?
         for idx, fn,src in zip(dfmeta.index, dfmeta.file_name, dfmeta.source):
             origfn = os.path.join(self.MOVIE_SCRIPT_DB_PATH, 'unprocessed', src, fn+'.txt')
-            if os.path.exists(origfn):
+            if os.path.exists(origfn) and not os.path.exists(ofn):
                 ofn = os.path.join(self.path_texts, idx, 'text.txt')
                 ensure_dir_exists(ofn)
                 shutil.copyfile(origfn, ofn)
@@ -511,657 +715,149 @@ class BechdelTest(BaseCorpus):
         ).drop(['actor_id','char_id'],axis=1)
         return allcasts
 
+    def get_urls(self,force=False):
+        if force or not self._urls:
+            df=pd.read_csv(self.URL_OF_URLS)
+            self._urls = dict(zip(df.id, df.url))
+        return self._urls
+
+
 
     def metadata_actors(self,force=False):
         if force or self._dfactors is None:
             self._dfactors = pd.read_csv(self.URL_ACTOR_METADATA, dtype='str').fillna('')
             self._dfactors['actor_id'] = self._dfactors.actor_url.apply(lambda x: x.split('/')[-1])
+            
 
         return self._dfactors
-
-
-
-
-
-
-
-
-
-
-
-
-
-#### PARSE SCRIPTING FUNCTIONS
-import subprocess
-import glob
-import os
-import numpy as np
-import argparse
-import re
-import time
-import codecs
-
-# PROCESS ARGUMENTS
-def read_args():
-    parser = argparse.ArgumentParser(description='Script that parses a movie script pdf/txt into its constituent classes')
-    parser.add_argument("-i", "--input", help="Path to script PDF/TXT to be parsed", required=True)
-    parser.add_argument("-o", "--output", help="Path to directory for saving output", required=True)
-    parser.add_argument("-a", "--abridged", help="Print abridged version (on/off)", default='off')
-    parser.add_argument("-t", "--tags", help="Print class label tags (on/off)", default='off')
-    parser.add_argument("-c", "--char", help="Print char info file (on/off)", default='off')
-    args = parser.parse_args()
-    if args.abridged not in ['on', 'off']: raise AssertionError("Invalid value. Choose either off or on")
-    if args.tags not in ['on', 'off']: raise AssertionError("Invalid value. Choose either off or on")
-    if args.char not in ['on', 'off']: raise AssertionError("Invalid value. Choose either off or on")
-    return os.path.abspath(args.input), os.path.abspath(args.output), args.abridged, args.tags, args.char
-
-
-# READ FILE
-def read_txt(file_path):
-    fid = codecs.open(file_path, mode='r', encoding='utf-8')
-    txt_file = fid.read().splitlines()
-    fid.close()
-    return txt_file
-
-
-# PROCESS FILE
-def read_file(file_orig):
-    if file_orig.endswith(".pdf"):
-        file_name = file_orig.replace('.pdf', '.txt')
-        subprocess.call(['pdftotext', '-enc', 'UTF-8', '-layout', file_orig, file_name])
-        script_orig = read_txt(file_name)
-        subprocess.call('rm "' + file_name + '"', shell=True)
-    elif file_orig.endswith(".txt"):
-        script_orig = read_txt(file_orig)
-    else:
-        raise AssertionError("Movie script file format should be either pdf or txt")
     
-    return script_orig
+    def metadata_chars(self,force=False):
+        if force or self._dfallchars is None:
+            self._dfallchars = pd.read_csv(self.URL_CHAR_METADATA, dtype='str').fillna('')
+            self._dfallchars['char_id'] = self._dfallchars.char_url.apply(lambda x: x.split('/')[-1])
+        
+        return self._dfallchars
 
 
-# DETECT SCENE BOUNDARIES:
-# LOOK FOR ALL-CAPS LINES CONTAINING "INT." OR "EXT."
-def get_scene_bound(script_noind, tag_vec, tag_set, bound_set):
-    bound_ind = [i for i, x in enumerate(script_noind) if tag_vec[i] not in tag_set and \
-                                                        x.isupper() and \
-                                                        any([y in x.lower() for y in bound_set])]
-    if len(bound_ind) > 0:
-        for x in bound_ind:
-            tag_vec[x] = 'S'
-    
-    return tag_vec, bound_ind
+    def get_speeches(self):
+        return [dial for t in self.texts() for dial in t.dialogue().speech]
 
+    @property
+    def path_topic_model(self): return os.path.join(self.path_data, 'topic_model.pkl')
 
-# DETECT TRANSITIONS:
-# LOOK FOR ALL-CAPS LINES PRECEDED BY NEWLINE, FOLLOWED BY NEWLINE AND CONTAINING "CUT " OR "FADE "
-def get_trans(script_noind, tag_vec, tag_set, trans_thresh, trans_set):
-    re_func = re.compile('[^a-zA-Z ]')
-    trans_ind = [i for i, x in enumerate(script_noind) if tag_vec[i] not in tag_set\
-                                                        and len(re_func.sub('', x).split()) < trans_thresh\
-                                                        and any([y in x.lower() for y in trans_set])]
-    if len(trans_ind) > 0:
-        for x in trans_ind:
-            tag_vec[x] = 'T'
-    
-    return tag_vec, trans_ind
-
-
-# DETECT METADATA:
-# LOOK FOR CONTENT PRECEDING SPECIFIC PHRASES THAT INDICATE BEGINNING OF MOVIE
-def get_meta(script_noind, tag_vec, tag_set, meta_thresh, meta_set, sent_thresh, bound_ind, trans_ind):
-    re_func = re.compile('[^a-zA-Z ]')
-    met_ind = [i for i, x in enumerate(script_noind) if tag_vec[i] not in tag_set\
-                                                        and i != 0 and i != (len(script_noind) - 1)\
-                                                        and len(x.split()) < meta_thresh\
-                                                        and len(re_func.sub('', script_noind[i - 1]).split()) == 0\
-                                                        and len(re_func.sub('', script_noind[i + 1]).split()) == 0\
-                                                        and any([y in x for y in meta_set])]
-    sent_ind = [i for i, x in enumerate(script_noind) if tag_vec[i] not in tag_set\
-                                                        and i != 0 and i != (len(script_noind) - 1)\
-                                                        and len(x.split()) > sent_thresh\
-                                                        and len(script_noind[i - 1].split()) == 0\
-                                                        and len(script_noind[i + 1].split()) > 0]
-    meta_ind = sorted(met_ind + bound_ind + trans_ind + sent_ind)
-    if len(meta_ind) > 0:
-        for i, x in enumerate(script_noind[: meta_ind[0]]):
-            if len(x.split()) > 0:
-                tag_vec[i] = 'M'
-    
-    return tag_vec
-
-
-# DECOMPOSE LINE WITH DIALOGUE AND DIALOGUE METADATA INTO INDIVIDUAL CLASSES
-def separate_dial_meta(line_str):
-    if '(' in line_str and ')' in line_str:
-        bef_par_str = ' '.join(line_str.split('(')[0].split())
-        in_par_str = ' '.join(line_str.split('(')[1].split(')')[0].split())
-        rem_str = ')'.join(line_str.split(')')[1: ])
-    else:
-        bef_par_str = line_str
-        in_par_str = ''
-        rem_str = ''
-    
-    return bef_par_str, in_par_str, rem_str
-
-
-# DETECT CHARACTER-DIALOGUE BLOCKS:
-# CHARACTER IS ALL-CAPS LINE PRECEDED BY NEWLINE AND NOT FOLLOWED BY A NEWLINE
-# DIALOGUE IS WHATEVER IMMEDIATELY FOLLOWS CHARACTER
-# EITHER CHARACTER OR DIALOGUE MIGHT CONTAIN DILAOGUE METADATA; WILL BE DETECTED LATER
-def get_char_dial(script_noind, tag_vec, tag_set, char_max_words):
-    char_ind = [i for i, x in enumerate(script_noind) if tag_vec[i] not in tag_set and any([y.isupper() for y in x.split()])\
-                                                        and i != 0 and i != (len(script_noind) - 1)\
-                                                        # and len(script_noind[i - 1].split()) == 0\
-                                                        and len(script_noind[i + 1].split()) > 0\
-                                                        and len(x.split()) < char_max_words\
-                                                        and any([separate_dial_meta(x)[y] for y in [0, 2]])]
-    if char_ind[-1] < (len(script_noind) - 1):
-        char_ind += [len(script_noind) - 1]
-    else:
-        char_ind += [len(script_noind)]
-    
-    for x in range(len(char_ind) - 1):
-        tag_vec[char_ind[x]] = 'C'
-        dial_flag = 1
-        while dial_flag > 0:
-            line_ind = char_ind[x] + dial_flag
-            if len(script_noind[line_ind].split()) > 0 and line_ind < char_ind[x + 1]:
-                dial_str, dial_meta_str, rem_str = separate_dial_meta(script_noind[line_ind])
-                if dial_str != '' or rem_str != '':
-                    tag_vec[line_ind] = 'D'
-                else:
-                    tag_vec[line_ind] = 'E'
-                
-                dial_flag += 1
-            else:
-                dial_flag = 0
-    
-    return tag_vec
-
-
-# DETECT SCENE DESCRIPTION
-# LOOK FOR REMAINING LINES THAT ARE NOT PAGE BREAKS
-def get_scene_desc(script_noind, tag_vec, tag_set):
-    desc_ind = [i for i, x in enumerate(script_noind) if tag_vec[i] not in tag_set and \
-                                                            len(x.split()) > 0 and\
-                                                            not x.strip('.').isdigit()]
-    for x in desc_ind:
-        tag_vec[x] = 'N'
-    
-    return tag_vec
-
-
-# CHECK IF LINES CONTAIN START OF PARENTHESES
-def par_start(line_set):
-    return [i for i, x in enumerate(line_set) if '(' in x]
-
-
-# CHECK IF LINES CONTAIN START OF PARENTHESES
-def par_end(line_set):
-    return [i for i, x in enumerate(line_set) if ')' in x]
-
-
-# COMBINE MULTI-LINE CLASSES, SPLIT MULTI-CLASS LINES
-def combine_tag_lines(tag_valid, script_valid):
-    tag_final = []
-    script_final = []
-    changed_tags = [x for x in tag_valid]
-    for i, x in enumerate(tag_valid):
-        if x in ['M', 'T', 'S']:
-            # APPEND METADATA, TRANSITION AND SCENE BOUNDARY LINES AS THEY ARE
-            tag_final.append(x)
-            script_final.append(script_valid[i])
-        elif x in ['C', 'D', 'N']:
-            # IF CHARACTER, DIALOGUE OR SCENE DESCRIPTION CONSIST OF MULTIPLE LINES, COMBINE THEM
-            if i == 0 or x != tag_valid[i - 1]:
-                # INITIALIZE IF FIRST OF MULTIPLE LINES
-                to_combine = []
-                comb_ind = []
+    def topic_model(self, docs = None, force=False, lim=None, embedding_model="all-MiniLM-L6-v2"):
+        from bertopic import BERTopic
+        if not force and self._topic_model: return self._topic_model
+        if force or not os.path.exists(self.path_topic_model):
+            if not docs: docs = self.get_speeches()
+            docs = docs[:lim]
+            topic_model = BERTopic(verbose=True, embedding_model=embedding_model, calculate_probabilities=True)
+            topics, probs = topic_model.fit_transform(docs)
+            topic_model.save(self.path_topic_model)
+            with open(self.path_topic_model.replace('.pkl','.docs.pkl'),'wb') as of: pickle.dump(docs, of)
+            with open(self.path_topic_model.replace('.pkl','.topics.pkl'),'wb') as of: pickle.dump(topics, of)
+            with open(self.path_topic_model.replace('.pkl','.probs.pkl'),'wb') as of: pickle.dump(probs, of)
             
-            to_combine += script_valid[i].split()
-            comb_ind.append(i)
-            if i == (len(tag_valid) - 1) or x != tag_valid[i + 1]:
-                combined_str = ' '.join(to_combine)
-                if x == 'N':
-                    # IF SCENE DESCRIPTION, WRITE AS IT IS
-                    tag_final.append(x)
-                    script_final.append(combined_str)
-                else:
-                    _, in_par, _ = separate_dial_meta(combined_str)
-                    if in_par != '':
-                        # FIND LINES CONTAINING DIALOGUE METADATA
-                        comb_lines = [script_valid[j] for j in comb_ind]
-                        dial_meta_ind = []
-                        while len(par_start(comb_lines)) > 0 and len(par_end(comb_lines)) > 0:
-                            start_ind = comb_ind[par_start(comb_lines)[0]]
-                            end_ind = comb_ind[par_end(comb_lines)[0]]
-                            dial_meta_ind.append([start_ind, end_ind])
-                            comb_ind = [x for x in comb_ind if x > end_ind]
-                            comb_lines = [script_valid[j] for j in comb_ind]
-                        
-                        # REPLACE OLD TAGS WITH DIALOGUE METADATA TAGS
-                        for dial_ind in dial_meta_ind:
-                            for change_ind in range(dial_ind[0], (dial_ind[1] + 1)):
-                                changed_tags[change_ind] = 'E'
-                        
-                        # EXTRACT DIALOGUE METADATA
-                        dial_meta_str = ''
-                        char_dial_str = ''
-                        while '(' in combined_str and ')' in combined_str:
-                            before_par, in_par, combined_str = separate_dial_meta(combined_str)
-                            char_dial_str += ' ' + before_par
-                            dial_meta_str += ' ' + in_par
-                        
-                        char_dial_str += ' ' + combined_str
-                        char_dial_str = ' '.join(char_dial_str.split())
-                        dial_meta_str = ' '.join(dial_meta_str.split())
-                        if x == 'C':
-                            # IF CHARACTER, APPEND DIALOGUE METADATA
-                            tag_final.append(x)
-                            script_final.append(' '.join(char_dial_str.split()))
-                            tag_final.append('E')
-                            script_final.append(dial_meta_str)
-                        elif x == 'D':
-                            # IF DIALOGUE, PREPEND DIALOGUE METADATA
-                            tag_final.append('E')
-                            script_final.append(dial_meta_str)
-                            tag_final.append(x)
-                            script_final.append(' '.join(char_dial_str.split()))
-                    else:
-                        # IF NO DIALOGUE METADATA, WRITE AS IT IS
-                        tag_final.append(x)
-                        script_final.append(combined_str)
-        elif x == 'E':
-            # IF DIALOGUE METADATA LINE, WRITE WITHOUT PARENTHESIS
-            split_1 = script_valid[i].split('(')
-            split_2 = split_1[1].split(')')
-            dial_met = split_2[0]
-            tag_final.append('E')
-            script_final.append(dial_met)
-    
-    return tag_final, script_final, changed_tags
-
-
-# CHECK FOR UN-MERGED CLASSES
-def find_same(tag_valid):
-    same_ind_mat = np.empty((0, 2), dtype=int)
-    if len(tag_valid) > 1:
-        check_start = 0
-        check_end = 1
-        while check_start < (len(tag_valid) - 1):
-            if tag_valid[check_start] != 'M' and tag_valid[check_start] == tag_valid[check_end]:
-                while check_end < len(tag_valid) and tag_valid[check_start] == tag_valid[check_end]:
-                    check_end += 1
-                
-                append_vec = np.array([[check_start, (check_end - 1)]], dtype=int)
-                same_ind_mat = np.append(same_ind_mat, append_vec, axis=0)
-                check_end += 1
-                check_start = check_end - 1
-            else:
-                check_start += 1
-                check_end += 1
-    
-    return same_ind_mat
-
-
-# MERGE CONSECUTIVE IDENTICAL CLASSES
-def merge_tag_lines(tag_final, script_final):
-    merge_ind = find_same(tag_final)
-    if merge_ind.shape[0] > 0:
-        # PRE-MERGE DISSIMILAR
-        tag_merged = tag_final[: merge_ind[0, 0]]
-        script_merged = script_final[: merge_ind[0, 0]]
-        for ind in range(merge_ind.shape[0] - 1):
-            # CURRENT MERGE SIMILAR
-            tag_merged += [tag_final[merge_ind[ind, 0]]]
-            script_merged += [' '.join(script_final[merge_ind[ind, 0]: (merge_ind[ind, 1] + 1)])]
-            # CURRENT MERGE DISSIMILAR
-            tag_merged += tag_final[(merge_ind[ind, 1] + 1): merge_ind[(ind + 1), 0]]
-            script_merged += script_final[(merge_ind[ind, 1] + 1): merge_ind[(ind + 1), 0]]
-        
-        # POST-MERGE SIMILAR
-        tag_merged += [tag_final[merge_ind[-1, 0]]]
-        script_merged += [' '.join(script_final[merge_ind[-1, 0]: (merge_ind[-1, 1] + 1)])]
-        # POST-MERGE DISSIMILAR
-        tag_merged += tag_final[(merge_ind[-1, 1] + 1): ]
-        script_merged += script_final[(merge_ind[-1, 1] + 1): ]
-    else:
-        tag_merged = tag_final
-        script_merged = script_final
-    
-    return tag_merged, script_merged
-
-
-# CHECK FOR DIALOGUE METADATA PRECEDING DIALOGUE
-def find_arrange(tag_valid):
-    c_ind = [i for i,x in enumerate(tag_valid) if x == 'C']
-    c_segs = []
-    arrange_ind = []
-    invalid_set = [['C', 'E', 'D'], ['C', 'D', 'E', 'D']]
-    if len(c_ind) > 0:
-        # BREAK UP INTO C-* BLOCKS
-        if c_ind[0] != 0:
-            c_segs.append(tag_valid[: c_ind[0]])
-        
-        for i in range((len(c_ind) - 1)):
-            c_segs.append(tag_valid[c_ind[i]: c_ind[i + 1]])
-        
-        c_segs.append(tag_valid[c_ind[-1]: ])
-        # RE-ARRANGE IN BLOCKS IF REQUIRED
-        for i in range(len(c_segs)):
-            inv_flag = 0
-            if len(c_segs[i]) > 2:
-                if any([c_segs[i][j: (j + len(invalid_set[0]))] == invalid_set[0] \
-                        for j in range(len(c_segs[i]) - len(invalid_set[0]) + 1)]):
-                    inv_flag = 1
-            
-            if inv_flag == 0 and len(c_segs[i]) > 3:
-                if any([c_segs[i][j: (j + len(invalid_set[1]))] == invalid_set[1] \
-                        for j in range(len(c_segs[i]) - len(invalid_set[1]) + 1)]):
-                    inv_flag = 1
-            
-            if inv_flag == 1:
-                arrange_ind.append(i)
-    
-    return c_segs, arrange_ind
-
-
-# REARRANGE DIALOGUE METADATA TO ALWAYS APPEAR AFTER DIALOGUE
-def rearrange_tag_lines(tag_merged, script_merged):
-    tag_rear = []
-    script_rear = []
-    char_blocks, dial_met_ind = find_arrange(tag_merged)
-    if len(dial_met_ind) > 0:
-        last_ind = 0
-        for ind in range(len(char_blocks)):
-            if ind in dial_met_ind:
-                # ADD CHARACTER
-                tag_rear += ['C']
-                script_rear.append(script_merged[last_ind])
-                # ADD DIALOGUE
-                if 'D' in char_blocks[ind]:
-                    tag_rear += ['D']
-                    script_rear.append(' '.join([script_merged[last_ind + i] \
-                                        for i, x in enumerate(char_blocks[ind]) if x == 'D']))
-                
-                # ADD DIALOGUE METADATA
-                if 'E' in char_blocks[ind]:
-                    tag_rear += ['E']
-                    script_rear.append(' '.join([script_merged[last_ind + i] \
-                                        for i, x in enumerate(char_blocks[ind]) if x == 'E']))
-                # ADD REMAINING
-                tag_rear += [x for x in char_blocks[ind] if x not in ['C', 'D', 'E']]
-                script_rear += [script_merged[last_ind + i] \
-                                for i, x in enumerate(char_blocks[ind]) if x not in ['C', 'D', 'E']]
-            else:
-                tag_rear += char_blocks[ind]
-                script_rear += script_merged[last_ind: (last_ind + len(char_blocks[ind]))]
-            
-            last_ind += len(char_blocks[ind])
-    
-    return tag_rear, script_rear
-
-
-# PARSER FUNCTION
-def parse(file_orig, save_dir, abr_flag, tag_flag, char_flag, save_name=None, abridged_name=None, tag_name=None):
-    #------------------------------------------------------------------------------------
-    # DEFINE
-    tag_set = ['S', 'N', 'C', 'D', 'E', 'T', 'M']
-    meta_set = ['BLACK', 'darkness']
-    bound_set = ['int.', 'ext.', 'int ', 'ext ']
-    trans_set = ['cut', 'fade', 'transition', 'dissolve']
-    char_max_words = 5
-    meta_thresh = 2
-    sent_thresh = 5
-    trans_thresh = 6
-    # READ PDF/TEXT FILE
-    script_orig = read_file(file_orig)
-    # REMOVE INDENTS
-    alnum_filter = re.compile('[\W_]+', re.UNICODE)
-    script_noind = []
-    for script_line in script_orig:
-        if len(script_line.split()) > 0 and alnum_filter.sub('', script_line) != '':
-            script_noind.append(' '.join(script_line.split()))
+            self._topic_model = topic_model
+            self._topic_model_docs = docs
+            self._topic_model_topics = topics
+            self._topic_model_probs = probs
         else:
-            script_noind.append('')
-    
-    num_lines = len(script_noind)
-    tag_vec = np.array(['0' for x in range(num_lines)])
-    #------------------------------------------------------------------------------------
-    # DETECT SCENE BOUNDARIES
-    tag_vec, bound_ind = get_scene_bound(script_noind, tag_vec, tag_set, bound_set)
-    # DETECT TRANSITIONS
-    tag_vec, trans_ind = get_trans(script_noind, tag_vec, tag_set, trans_thresh, trans_set)
-    # DETECT METADATA
-    tag_vec = get_meta(script_noind, tag_vec, tag_set, meta_thresh, meta_set, sent_thresh, bound_ind, trans_ind)
-    # DETECT CHARACTER-DIALOGUE
-    tag_vec = get_char_dial(script_noind, tag_vec, tag_set, char_max_words)
-    # DETECT SCENE DESCRIPTION
-    tag_vec = get_scene_desc(script_noind, tag_vec, tag_set)
-    #------------------------------------------------------------------------------------
-    # REMOVE UN-TAGGED LINES
-    nz_ind_vec = np.where(tag_vec != '0')[0]
-    tag_valid = []
-    script_valid = []
-    for i, x in enumerate(tag_vec):
-        if x != '0':
-            tag_valid.append(x)
-            script_valid.append(script_noind[i])
-    
-    # UPDATE TAGS
-    tag_valid, script_valid, changed_tags = combine_tag_lines(tag_valid, script_valid)
-    for change_ind in range(len(nz_ind_vec)):
-        if tag_vec[nz_ind_vec[change_ind]] == 'D':
-            tag_vec[nz_ind_vec[change_ind]] = changed_tags[change_ind]
-    
-    # SAVE TAGS TO FILE
-    if tag_flag == 'on':
-        if tag_name is None:
-            tag_name = os.path.join(save_dir, '.'.join(file_orig.split('/')[-1].split('.')[: -1]) + '_tags.txt')
-        else:
-            tag_name = os.path.join(save_dir, tag_name)
+            self._topic_model=BERTopic.load(self.path_topic_model)
+            with open(self.path_topic_model.replace('.pkl','.docs.pkl'),'rb') as of: self._topic_model_docs=pickle.load(of)
+            with open(self.path_topic_model.replace('.pkl','.topics.pkl'),'rb') as of: self._topic_model_topics=pickle.load(of)
+            with open(self.path_topic_model.replace('.pkl','.probs.pkl'),'rb') as of: self._topic_model_probs=pickle.load(of)
         
-        np.savetxt(tag_name, tag_vec, fmt='%s', delimiter='\n')
-    
-    # FORMAT TAGS, LINES
-    max_rev = 0
-    while find_same(tag_valid).shape[0] > 0 or len(find_arrange(tag_valid)[1]) > 0:
-        tag_valid, script_valid = merge_tag_lines(tag_valid, script_valid)
-        tag_valid, script_valid = rearrange_tag_lines(tag_valid, script_valid)
-        max_rev += 1
-        if max_rev == 1000: raise AssertionError("Too many revisions. Something must be wrong.")
-    
-    #------------------------------------------------------------------------------------
-    # WRITE PARSED SCRIPT TO FILE
-    if save_name is None:
-        save_name = os.path.join(save_dir, '.'.join(file_orig.split('/')[-1].split('.')[: -1]) + '_parsed.txt')
-    else:
-        save_name = os.path.join(save_dir, save_name)
-    
-    fid = open(save_name, 'w')
-    for tag_ind in range(len(tag_valid)):
-        _ = fid.write(tag_valid[tag_ind] + ': ' + script_valid[tag_ind] + '\n')
-    
-    fid.close()
-    #------------------------------------------------------------------------------------
-    # CREATE CHARACTER=>DIALOGUE ABRIDGED VERSION
-    if abr_flag == 'on':
-        fid = open(save_name, 'r')
-        parsed_script = fid.read().splitlines()
-        fid.close()
-        if abridged_name is None:
-            abridged_name = os.path.join(save_dir, '.'.join(file_orig.split('/')[-1].split('.')[: -1]) + '_abridged.txt')
-        else:
-            abridged_name = os.path.join(save_dir, abridged_name)
+        self._topic_model_doc2topic = {k:v for k,v in zip(self._topic_model_docs, self._topic_model_topics) if v>=0}
+        self._topic_model_doc2probs = {k:dict(enumerate(v)) for k,v in zip(self._topic_model_docs, self._topic_model_probs)}
+        return self._topic_model
         
-        abridged_ind = [i for i, x in enumerate(parsed_script) if x.startswith('C:') and \
-                                                                parsed_script[i + 1].startswith('D:')]
-        fid = open(abridged_name, 'w')
-        for i in abridged_ind:
-            char_str = ' '.join(parsed_script[i].split('C:')[1].split())
-            dial_str = ' '.join(parsed_script[i + 1].split('D:')[1].split())
-            _ = fid.write(''.join([char_str, '=>', dial_str, '\n']))
-        
-        fid.close()
-    
-    #------------------------------------------------------------------------------------
-    # CREATE CHAR INFO FILE
-    if char_flag == 'on':
-        tag_str_vec = np.array(tag_valid)
-        script_vec = np.array(script_valid)
-        char_ind = np.where(tag_str_vec == 'C')[0]
-        char_set = sorted(set(script_vec[char_ind]))
-        charinfo_vec = []
-        for char_id in char_set:
-            spk_ind = list(set(np.where(script_vec == char_id)[0]) & set(char_ind))
-            if len(spk_ind) > 0:
-                num_lines = len([i for i in spk_ind if i != (len(tag_str_vec) - 1) and \
-                                                    tag_str_vec[i + 1] == 'D'])
-                charinfo_str = char_id + ': ' + str(num_lines) + '|'.join([' ', ' ', ' ', ' '])
-                charinfo_vec.append(charinfo_str)
-        
-        charinfo_name = os.path.join(save_dir, '.'.join(file_orig.split('/')[-1].split('.')[: -1]) + '_charinfo.txt')
-        np.savetxt(charinfo_name, charinfo_vec, fmt='%s', delimiter='\n')
-
-
-# MAIN FUNCTION
-if __name__ == "__main__":
-    file_orig, save_dir, abr_flag, tag_flag, char_flag = read_args()
-    parse(file_orig, save_dir, abr_flag, tag_flag, char_flag)
 
 
 
 
 
-## RYAN
-PARSE_SCRIPT_KEY=dict(
-    S = 'Scene',
-    N = 'Scene description',
-    C = 'Character',
-    D = 'Dialogue',
-    E = 'Dialogue metadata',
-    T = 'Transition',
-    M = 'Metadata'
-)
 
 
-def parse_script_iter(script_orig):
-    # DEFINE
-    tag_set = ['S', 'N', 'C', 'D', 'E', 'T', 'M']
-    meta_set = ['BLACK', 'darkness']
-    bound_set = ['int.', 'ext.', 'int ', 'ext ']
-    trans_set = ['cut', 'fade', 'transition', 'dissolve']
-    char_max_words = 5
-    meta_thresh = 2
-    sent_thresh = 5
-    trans_thresh = 6
-    # REMOVE INDENTS
-    alnum_filter = re.compile('[\W_]+', re.UNICODE)
-    script_noind = []
-    for script_line in script_orig.split('\n'):
-        if len(script_line.split()) > 0 and alnum_filter.sub('', script_line) != '':
-            script_noind.append(' '.join(script_line.split()))
-        else:
-            script_noind.append('')
-    
-    num_lines = len(script_noind)
-    tag_vec = np.array(['0' for x in range(num_lines)])
-    #------------------------------------------------------------------------------------
-    # DETECT SCENE BOUNDARIES
-    tag_vec, bound_ind = get_scene_bound(script_noind, tag_vec, tag_set, bound_set)
-    # DETECT TRANSITIONS
-    tag_vec, trans_ind = get_trans(script_noind, tag_vec, tag_set, trans_thresh, trans_set)
-    # DETECT METADATA
-    tag_vec = get_meta(script_noind, tag_vec, tag_set, meta_thresh, meta_set, sent_thresh, bound_ind, trans_ind)
-    # DETECT CHARACTER-DIALOGUE
-    tag_vec = get_char_dial(script_noind, tag_vec, tag_set, char_max_words)
-    # DETECT SCENE DESCRIPTION
-    tag_vec = get_scene_desc(script_noind, tag_vec, tag_set)
-    #------------------------------------------------------------------------------------
-    # REMOVE UN-TAGGED LINES
-    nz_ind_vec = np.where(tag_vec != '0')[0]
-    tag_valid = []
-    script_valid = []
-    for i, x in enumerate(tag_vec):
-        if x != '0':
-            tag_valid.append(x)
-            script_valid.append(script_noind[i])
-    
-    # UPDATE TAGS
-    tag_valid, script_valid, changed_tags = combine_tag_lines(tag_valid, script_valid)
-    for change_ind in range(len(nz_ind_vec)):
-        if tag_vec[nz_ind_vec[change_ind]] == 'D':
-            tag_vec[nz_ind_vec[change_ind]] = changed_tags[change_ind]
-    
-    # # SAVE TAGS TO FILE
-    # if tag_flag == 'on':
-    # 	if tag_name is None:
-    # 		tag_name = os.path.join(save_dir, '.'.join(file_orig.split('/')[-1].split('.')[: -1]) + '_tags.txt')
-    # 	else:
-    # 		tag_name = os.path.join(save_dir, tag_name)
-        
-    # 	np.savetxt(tag_name, tag_vec, fmt='%s', delimiter='\n')
-    
-    # FORMAT TAGS, LINES
-    max_rev = 0
-    while find_same(tag_valid).shape[0] > 0 or len(find_arrange(tag_valid)[1]) > 0:
-        tag_valid, script_valid = merge_tag_lines(tag_valid, script_valid)
-        tag_valid, script_valid = rearrange_tag_lines(tag_valid, script_valid)
-        max_rev += 1
-        if max_rev == 1000: raise AssertionError("Too many revisions. Something must be wrong.")
-    
-    #------------------------------------------------------------------------------------
-    # RETURN
-    scene_num=0
-    line_num=0
-    
-    def reset_odx(): return dict((xk,'') for xk in PARSE_SCRIPT_KEY)
-    odx = reset_odx()
-    last_speaker = None
 
-    for tag_ind in range(len(tag_valid)):
-        tag=tag_valid[tag_ind]
-        text=script_valid[tag_ind]
-        
-        if tag=='S':
-            scene_num+=1
-            odx=dict((xk,'') for xk in PARSE_SCRIPT_KEY)
-        if not scene_num: continue
 
-        odx[tag] = text
 
-        if tag == 'D':
-            line_num+=1
-            speaker=odx.get('C','')
-            speaker=speaker.replace(':', '')
-            for xx in [':','O.S.','V.O.',"'S VOICE","'S COM VOICE"]:
-                speaker=speaker.replace(xx,'')
-            # speaker = ' '.join(x for x in speaker.split() if x==x.upper())
-            speaker = noPunc(speaker.strip()).strip()
-            if last_speaker and speaker in {'CONTINUED', "CONT'D", "CONTD"}:
-                speaker=last_speaker
-            last_speaker=speaker
+def get_imdb_id(imdb_id):
+    # get imdb id
+    idx=str(imdb_id)
+    if idx.startswith('tt'): idx=idx[2:]
+    while len(idx)<7: idx='0'+idx    
+    return idx
 
-            yield dict(
-                speaker=speaker,
-                speech=text,
 
-                direction=odx.get('E',''),
-                narration=odx.get('N'),
-                scene_desc = odx['S'],
-                scene_num=scene_num,
-                line_num=line_num,
-                num_words = len(text.strip().split())
-            )
-            odx = {**reset_odx(), **dict(S=odx['S'])}
-    
-def parse_script(script_orig):
-    import pandas as pd
-    return pd.DataFrame(parse_script_iter(script_orig)).set_index('line_num')
+def get_all_speech_docs():
+    C=BechdelTest()
+    path_dials=f'{C.MOVIE_SCRIPT_DB_PATH}/parsed/dialogue'
+    docs = []
+    for fn in tqdm(os.listdir(path_dials)):
+        with open(os.path.join(path_dials,fn)) as f:
+            for ln in f:
+                if '=>' in ln:
+                    doc=ln.split('=>',1)[1].strip()
+                    docs.append(doc)
+    return docs
 
-    
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def fixname(x):
     while '  ' in x: x=x.replace('  ',' ')
     return x
+
+
+
+
+
+def draw(id):
+  clear_output(wait=True)
+  t = C.textd[id]
+  g = t.get_network()
+  
+  
+  printm(f'# {id}')
+
+  printm(f'## Final social network')
+  draw_nx(g,show=True)
+
+  printm(f'## Gender/race ratios')
+  o=[]
+  for k,v in t.get_ratios().items():
+    o+=[f'* {k.replace("__", " (")+")"}: **{round(v,1):,}**']
+  printm('\n'.join(o))
+
+  printm(f'## Bechdeltest.com score')
+  t.show_bechdel_scores()
+
+  printm(f'## Dialogue between non-cismen')
+  t.show_nonCM_dialogue()
+
+  printm(f'## Dialogue between people of  color')
+  t.show_POC_dialogue()
+
+  printm(f'## Cast')
+  display(t.get_cast())
+
+
+def draw_dynamic(id):
+    t = C.textd[id]
+    fn,htm = t.draw_networks()
+    return htm
+
+
+

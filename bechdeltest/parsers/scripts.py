@@ -107,7 +107,7 @@ def parse_script_iter(script_orig):
     
 def parse_script(script_orig):
 	import pandas as pd
-	return pd.DataFrame(parse_script_iter(script_orig)).set_index('line_num')
+	return pd.DataFrame(parse_script_iter(script_orig))#.set_index('line_num')
 
 def parse_script_file(filename):
     with open(filename) as f: txt=f.read()
